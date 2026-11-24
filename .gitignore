@@ -1,0 +1,29 @@
+# Python environment
+
+.venv/
+
+# Data
+
+data/
+
+# Results
+
+results/
+
+# Python
+
+**pycache**/
+
+*.pyc
+
+# Jupyter
+
+.ipynb_checkpoints/
+
+# Secrets
+
+.env
+
+# macOS
+
+.DS_Store
