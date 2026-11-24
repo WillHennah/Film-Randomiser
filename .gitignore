@@ -8,6 +8,7 @@ data/
 watched_films.csv
 family_film_options.csv
 current_film_choices.json
+.streamlit/secrets.toml
 
 # Results
 

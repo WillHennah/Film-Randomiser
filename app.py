@@ -5,6 +5,7 @@ import time
 import pandas as pd
 import streamlit as st
 from datetime import date
+from supabase import create_client
 
 FAMILY = ["William", "Henna", "Miilo", "Aimi"]
 DATA_FILE = Path("watched_films.csv")
@@ -21,24 +22,46 @@ st.set_page_config(
 )
 
 # ---------------------------------------------------------
+# Supabase
+# ---------------------------------------------------------
+
+@st.cache_resource
+def get_supabase_client():
+
+    return create_client(
+        st.secrets["SUPABASE_URL"],
+        st.secrets["SUPABASE_KEY"],
+    )
+
+
+supabase = get_supabase_client()
+
+# ---------------------------------------------------------
 # Film choice storage
 # ---------------------------------------------------------
 
-def load_film_choices():
-    """Load the current film nominations from disk."""
+def load_film_choices_from_supabase():
 
-    if not CHOICES_FILE.exists():
-        return {
-            person: []
-            for person in FAMILY
-        }
+    response = (
+        supabase
+        .table("film_choices")
+        .select("family_member, film_title, created_at")
+        .order("created_at")
+        .execute()
+    )
 
-    with open(CHOICES_FILE, "r", encoding="utf-8") as file:
-        choices = json.load(file)
+    choices = {
+        person: []
+        for person in FAMILY
+    }
 
-    # Make sure every current family member exists
-    for person in FAMILY:
-        choices.setdefault(person, [])
+    for row in response.data:
+
+        person = row["family_member"]
+        film = row["film_title"]
+
+        if person in choices:
+            choices[person].append(film)
 
     return choices
 
@@ -162,7 +185,9 @@ def choose_film(chooser, film_choices):
 # ---------------------------------------------------------
 
 if "film_choices" not in st.session_state:
-    st.session_state.film_choices = load_film_choices()
+    st.session_state.film_choices = (
+        load_film_choices_from_supabase()
+    )
 
 if "draw_result" not in st.session_state:
     st.session_state.draw_result = None
