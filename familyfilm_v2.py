@@ -1,9 +1,16 @@
+# familyfilm_v2.py
+
+# Everyone chooses 4 films for the selector
+# Who ever had the last film choice cannot have the next film choice
+# If someone falls 5 choices behind in the selection numbers, then they get one of their films automatically selected.
+
 import os
 import pandas as pd
-import random as rm
 import datetime
 import csv
 import time
+import random
+
 from datetime import date
 
 #Load file tracking the Watched Films
