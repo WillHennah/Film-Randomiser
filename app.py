@@ -1,6 +1,7 @@
 from pathlib import Path
 import json
 import random
+import time
 import pandas as pd
 import streamlit as st
 from datetime import date
@@ -166,6 +167,9 @@ if "film_choices" not in st.session_state:
 if "draw_result" not in st.session_state:
     st.session_state.draw_result = None
 
+if "reveal_draw" not in st.session_state:
+    st.session_state.reveal_draw = False
+
 if "confirmation_message" not in st.session_state:
     st.session_state.confirmation_message = None
 
@@ -180,6 +184,15 @@ def load_history():
 
 watched = load_history()
 
+# ---------------------------------------------------------
+# Prepare history data
+# ---------------------------------------------------------
+
+watched["Watched Date Parsed"] = pd.to_datetime(
+    watched["Watched Date"],
+    format="%d.%m.%Y",
+    errors="coerce",
+)
 
 # ---------------------------------------------------------
 # Header
@@ -261,11 +274,173 @@ for column, person in zip(columns, FAMILY):
         )
 
 
-st.caption(
-    f"We have watched {sum(family_counts.values())} "
-    "family selections so far."
+total_films = (
+    watched["Name"]
+    .fillna("")
+    .astype(str)
+    .str.strip()
+    .ne("")
+    .sum()
 )
 
+recent_count = int(
+    chooser_counts.get("Recent", 0)
+)
+
+other_count = int(
+    chooser_counts.get("Other", 0)
+)
+
+st.caption(
+    f"We have watched **{total_films} films** "
+    "as a family."
+)
+
+if recent_count or other_count:
+
+    st.caption(
+        f"That includes {recent_count} new-release "
+        f"selections and {other_count} films watched "
+        "for other reasons."
+    )
+
+# ---------------------------------------------------------
+# Selection balance chart
+# ---------------------------------------------------------
+
+balance_df = pd.DataFrame({
+    "Family member": FAMILY,
+    "Films selected": [
+        family_counts[person]
+        for person in FAMILY
+    ],
+})
+
+balance_df = balance_df.set_index("Family member")
+
+st.markdown("#### ⚖️ Selection balance")
+
+st.bar_chart(
+    balance_df,
+    horizontal=True,
+)
+
+highest_count = max(family_counts.values())
+lowest_count = min(family_counts.values())
+
+current_gap = highest_count - lowest_count
+
+if current_gap == 0:
+
+    st.success(
+        "⚖️ Perfectly balanced! Everyone has had "
+        "the same number of selections."
+    )
+
+elif current_gap == 1:
+
+    st.success(
+        "⚖️ Very balanced. Everyone is within "
+        "one selection of each other."
+    )
+
+elif current_gap < 5:
+
+    st.info(
+        f"⚖️ The current spread is {current_gap} selections."
+    )
+
+else:
+
+    st.warning(
+        f"⚖️ The current spread is {current_gap} selections. "
+        "The catch-up rule is active."
+    )
+
+# ---------------------------------------------------------
+# Recent films
+# ---------------------------------------------------------
+
+st.markdown("#### 🍿 Recently watched")
+
+recent_films = (
+    watched
+    .sort_values(
+        "Watched Date Parsed",
+        ascending=False,
+    )
+    .head(10)
+    [["Name", "Chooser", "Watched Date"]]
+)
+
+recent_films = recent_films.rename(
+    columns={
+        "Name": "Film",
+        "Chooser": "Choice",
+        "Watched Date": "Watched",
+    }
+)
+
+st.dataframe(
+    recent_films,
+    hide_index=True,
+    width='stretch',
+)
+
+with st.expander("🎞️ View full film history"):
+
+    full_history = (
+        watched
+        .sort_values(
+            "Watched Date Parsed",
+            ascending=False,
+        )
+        [["Name", "Chooser", "Watched Date"]]
+        .rename(
+            columns={
+                "Name": "Film",
+                "Chooser": "Choice",
+                "Watched Date": "Watched",
+            }
+        )
+    )
+
+    st.dataframe(
+        full_history,
+        hide_index=True,
+        width='stretch',
+    )
+
+# ---------------------------------------------------------
+# Films over time
+# ---------------------------------------------------------
+
+st.markdown("#### 📅 Family film history")
+
+valid_dates = watched.dropna(
+    subset=["Watched Date Parsed"]
+).copy()
+
+valid_dates["Year"] = (
+    valid_dates["Watched Date Parsed"].dt.year
+)
+
+films_per_year = (
+    valid_dates
+    .groupby("Year")
+    .size()
+    .reset_index(name="Films watched")
+)
+
+films_per_year["Year"] = (
+    films_per_year["Year"].astype(str)
+)
+
+films_per_year = films_per_year.set_index("Year")
+
+st.bar_chart(
+    films_per_year
+)
 
 st.divider()
 
@@ -478,6 +653,10 @@ all_submitted = all(
     for person in FAMILY
 )
 
+# ---------------------------------------------------------
+# Not everyone has four films
+# ---------------------------------------------------------
+
 if not all_submitted:
 
     st.info(
@@ -485,9 +664,16 @@ if not all_submitted:
         "has submitted four films."
     )
 
+# ---------------------------------------------------------
+# Everyone is ready
+# ---------------------------------------------------------
+
 else:
 
-    # No draw has been made yet
+    # -----------------------------------------------------
+    # No result yet -> show Draw button
+    # -----------------------------------------------------
+
     if st.session_state.draw_result is None:
 
         st.write(
@@ -503,6 +689,7 @@ else:
 
         if draw_clicked:
 
+            # Calculate result FIRST
             chooser, reason = choose_family_member(
                 family_counts=family_counts,
                 last_chooser=last_chooser,
@@ -513,15 +700,22 @@ else:
                 film_choices=st.session_state.film_choices,
             )
 
+            # Store result
             st.session_state.draw_result = {
                 "chooser": chooser,
                 "film": selected_film,
                 "reason": reason,
             }
 
+            # Mark this as a new result needing a reveal
+            st.session_state.reveal_draw = True
+
             st.rerun()
 
-    # A draw result exists
+    # -----------------------------------------------------
+    # Result exists -> reveal/display it
+    # -----------------------------------------------------
+
     else:
 
         result = st.session_state.draw_result
@@ -529,6 +723,47 @@ else:
         chooser = result["chooser"]
         selected_film = result["film"]
         reason = result["reason"]
+
+        # -------------------------------------------------
+        # Animated reveal - only once
+        # -------------------------------------------------
+
+        if st.session_state.reveal_draw:
+
+            reveal_box = st.empty()
+
+            reveal_box.markdown(
+                "### 🎲 Choosing whose film it will be..."
+            )
+
+            time.sleep(1.5)
+
+            reveal_box.markdown(
+                f"## 🎉 {chooser}!"
+            )
+
+            time.sleep(1.5)
+
+            reveal_box.markdown(
+                f"### 🎬 Choosing one of {chooser}'s four films..."
+            )
+
+            time.sleep(1.8)
+
+            reveal_box.markdown(
+                f"# 🍿 {selected_film}"
+            )
+
+            st.balloons()
+
+            time.sleep(1)
+
+            # Reveal has now been completed
+            st.session_state.reveal_draw = False
+
+        # -------------------------------------------------
+        # Permanent result display
+        # -------------------------------------------------
 
         st.success(
             "🎉 This week's family film has been chosen!"
@@ -555,6 +790,10 @@ else:
                 "Selected through the normal random draw."
             )
 
+        # -------------------------------------------------
+        # Result actions
+        # -------------------------------------------------
+
         st.divider()
 
         confirm_col, reset_col = st.columns(2)
@@ -574,28 +813,32 @@ else:
                 use_container_width=True,
             )
 
+        # -------------------------------------------------
+        # Confirm film
+        # -------------------------------------------------
+
         if confirm_clicked:
 
-            # 1. Write the confirmed result to history
+            # Add film to permanent history
             add_watched_film(
                 film_name=selected_film,
                 chooser=chooser,
             )
 
-            # 2. Remove only the selected film from that
-            # person's nominations
+            # Remove only the selected film from the
+            # chooser's persistent nominations
             remove_selected_film(
                 chooser=chooser,
                 film_name=selected_film,
             )
 
-            # 3. Clear the pending draw
+            # Clear draw state
             st.session_state.draw_result = None
+            st.session_state.reveal_draw = False
 
-            # 4. Clear cached historical data so totals refresh
+            # Force historical data to reload
             st.cache_data.clear()
 
-            # 5. Show confirmation after the rerun
             st.session_state.confirmation_message = (
                 f"🎉 {selected_film} has been added "
                 f"to the family film history. "
@@ -604,7 +847,13 @@ else:
 
             st.rerun()
 
+        # -------------------------------------------------
+        # Development redraw
+        # -------------------------------------------------
+
         if reset_clicked:
 
             st.session_state.draw_result = None
+            st.session_state.reveal_draw = False
+
             st.rerun()
