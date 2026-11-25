@@ -1,4 +1,4 @@
-from pathlib import Path
+
 import random
 import time
 import pandas as pd
@@ -7,7 +7,6 @@ from datetime import date
 from supabase import create_client
 
 FAMILY = ["William", "Henna", "Miilo", "Aimi"]
-DATA_FILE = Path("watched_films.csv")
 
 # ---------------------------------------------------------
 # Configuration
@@ -62,6 +61,16 @@ def load_film_choices_from_supabase():
             choices[person].append(film)
 
     return choices
+
+def refresh_film_choices():
+    """
+    Reload the current nominations from Supabase into
+    this browser session.
+    """
+
+    st.session_state.film_choices = (
+        load_film_choices_from_supabase()
+    )
 
 def save_person_film_choices(person, choices):
     """
@@ -141,6 +150,112 @@ def remove_selected_film(chooser, film_name):
 
     st.session_state.film_choices[chooser] = updated_choices
 
+def load_current_draw():
+    """
+    Load the shared pending draw from Supabase.
+
+    Returns:
+        dict: current draw when one exists
+        None: when there is no pending draw
+    """
+
+    response = (
+        supabase
+        .table("current_draw")
+        .select(
+            "chooser, film_title, reason, drawn_at"
+        )
+        .eq("singleton_id", 1)
+        .limit(1)
+        .execute()
+    )
+
+    if (
+        response is None
+        or not response.data
+    ):
+        return None
+
+    row = response.data[0]
+
+    return {
+        "chooser": row["chooser"],
+        "film": row["film_title"],
+        "reason": row["reason"],
+        "drawn_at": row["drawn_at"],
+    }
+
+def create_or_get_current_draw(
+    chooser,
+    film_title,
+    reason,
+):
+    """
+    Propose a draw to Supabase.
+
+    If another session has already created a pending draw,
+    Supabase returns that existing result instead.
+    """
+
+    response = (
+        supabase
+        .rpc(
+            "create_or_get_current_draw",
+            {
+                "proposed_chooser": chooser,
+                "proposed_film_title": film_title,
+                "proposed_reason": reason,
+            },
+        )
+        .execute()
+    )
+
+    if not response.data:
+        raise RuntimeError(
+            "Supabase did not return a draw result."
+        )
+
+    row = response.data[0]
+
+    return {
+        "chooser": row["chooser"],
+        "film": row["film_title"],
+        "reason": row["reason"],
+        "drawn_at": row["drawn_at"],
+    }
+
+def delete_current_draw():
+    """
+    Delete the shared pending draw.
+    Used only by the development reset control.
+    """
+
+    (
+        supabase
+        .table("current_draw")
+        .delete()
+        .eq("singleton_id", 1)
+        .execute()
+    )
+
+def confirm_shared_draw():
+    """
+    Atomically confirm the shared draw in Supabase.
+    """
+
+    response = (
+        supabase
+        .rpc("confirm_current_draw")
+        .execute()
+    )
+
+    if not response.data:
+        raise RuntimeError(
+            "Supabase did not return confirmation details."
+        )
+
+    return response.data[0]
+
 # ---------------------------------------------------------
 # Film selection logic
 # ---------------------------------------------------------
@@ -213,13 +328,22 @@ if "film_choices" not in st.session_state:
     )
 
 if "draw_result" not in st.session_state:
-    st.session_state.draw_result = None
+    st.session_state.draw_result = load_current_draw()
 
 if "reveal_draw" not in st.session_state:
     st.session_state.reveal_draw = False
 
 if "confirmation_message" not in st.session_state:
     st.session_state.confirmation_message = None
+
+if "choice_refresh_counter" not in st.session_state:
+    st.session_state.choice_refresh_counter = 0
+
+if "save_message" not in st.session_state:
+    st.session_state.save_message = None
+
+if "draw_message" not in st.session_state:
+    st.session_state.draw_message = None
 
 # ---------------------------------------------------------
 # Load film history
@@ -598,6 +722,38 @@ st.write(
     "**All four films have an equal chance of being selected.**"
 )
 
+if st.session_state.save_message:
+
+    st.success(
+        st.session_state.save_message
+    )
+
+    st.session_state.save_message = None
+
+refresh_col, status_col = st.columns(
+    [1, 2],
+    vertical_alignment="center",
+)
+
+with refresh_col:
+
+    if st.button(
+        "🔄 Refresh choices",
+        use_container_width=True,
+    ):
+
+        refresh_film_choices()
+
+        st.session_state.choice_refresh_counter += 1
+
+        st.rerun()
+
+with status_col:
+
+    st.caption(
+        "Refresh to see changes submitted from another phone."
+    )
+
 tabs = st.tabs(FAMILY)
 
 for tab, person in zip(tabs, FAMILY):
@@ -614,28 +770,40 @@ for tab, person in zip(tabs, FAMILY):
                 "Film 1",
                 value=existing_choices[0]
                 if len(existing_choices) > 0 else "",
-                key=f"{person}_film_1",
+                key=(
+                    f"{person}_film_1_"
+                    f"{st.session_state.choice_refresh_counter}"
+                ),
             )
 
             film_2 = st.text_input(
                 "Film 2",
                 value=existing_choices[1]
                 if len(existing_choices) > 1 else "",
-                key=f"{person}_film_2",
+                key=(
+                    f"{person}_film_2_"
+                    f"{st.session_state.choice_refresh_counter}"
+                ),
             )
 
             film_3 = st.text_input(
                 "Film 3",
                 value=existing_choices[2]
                 if len(existing_choices) > 2 else "",
-                key=f"{person}_film_3",
+                key=(
+                    f"{person}_film_3_"
+                    f"{st.session_state.choice_refresh_counter}"
+                ),
             )
 
             film_4 = st.text_input(
                 "Film 4",
                 value=existing_choices[3]
                 if len(existing_choices) > 3 else "",
-                key=f"{person}_film_4",
+                key=(
+                    f"{person}_film_4_"
+                    f"{st.session_state.choice_refresh_counter}"
+                ),
             )
 
             submitted = st.form_submit_button(
@@ -675,12 +843,12 @@ for tab, person in zip(tabs, FAMILY):
                         choices=choices,
                     )
 
-                    # Update this session only AFTER Supabase succeeds
-                    st.session_state.film_choices[person] = choices
+                    refresh_film_choices()
 
-                    st.success(
-                        f"✅ {person}'s four films have been saved."
-                    )
+                    st.session_state.choice_refresh_counter += 1
+
+
+                    st.rerun()
 
                 except Exception as error:
 
@@ -747,6 +915,32 @@ else:
 st.divider()
 st.subheader("🎲 The draw")
 
+if st.button(
+    "🔄 Refresh draw status",
+    use_container_width=True,
+):
+
+    previous_draw = st.session_state.draw_result
+    latest_draw = load_current_draw()
+
+    st.session_state.draw_result = latest_draw
+
+    # Animate only when this browser discovers a new draw
+    if previous_draw is None and latest_draw is not None:
+        st.session_state.reveal_draw = True
+    else:
+        st.session_state.reveal_draw = False
+
+    st.rerun()
+
+if st.session_state.draw_message:
+
+    st.warning(
+        st.session_state.draw_message
+    )
+
+    st.session_state.draw_message = None
+
 all_submitted = all(
     len(st.session_state.film_choices.get(person, [])) == 4
     for person in FAMILY
@@ -788,7 +982,28 @@ else:
 
         if draw_clicked:
 
-            # Calculate result FIRST
+            latest_choices = (
+                load_film_choices_from_supabase()
+            )
+
+            latest_all_submitted = all(
+                len(latest_choices.get(person, [])) == 4
+                for person in FAMILY
+            )
+
+            if not latest_all_submitted:
+
+                st.session_state.film_choices = latest_choices
+
+                st.session_state.choice_refresh_counter += 1
+
+                st.session_state.draw_message = (
+                    "The nominations changed in another session. "
+                    "Everyone must have four films before drawing."
+                )
+
+                st.rerun()
+
             chooser, reason = choose_family_member(
                 family_counts=family_counts,
                 last_chooser=last_chooser,
@@ -796,17 +1011,18 @@ else:
 
             selected_film = choose_film(
                 chooser=chooser,
-                film_choices=st.session_state.film_choices,
+                film_choices=latest_choices,
             )
 
-            # Store result
-            st.session_state.draw_result = {
-                "chooser": chooser,
-                "film": selected_film,
-                "reason": reason,
-            }
+            st.session_state.film_choices = latest_choices
 
-            # Mark this as a new result needing a reveal
+            shared_result = create_or_get_current_draw(
+                chooser=chooser,
+                film_title=selected_film,
+                reason=reason,
+            )
+
+            st.session_state.draw_result = shared_result
             st.session_state.reveal_draw = True
 
             st.rerun()
@@ -918,39 +1134,67 @@ else:
 
         if confirm_clicked:
 
-            # Add film to permanent history
-            add_watched_film(
-                film_name=selected_film,
-                chooser=chooser,
-            )
+            try:
 
-            # Remove only the selected film from the
-            # chooser's persistent nominations
-            remove_selected_film(
-                chooser=chooser,
-                film_name=selected_film,
-            )
+                confirmed = confirm_shared_draw()
 
-            # Clear draw state
-            st.session_state.draw_result = None
-            st.session_state.reveal_draw = False
+                confirmed_film = confirmed["confirmed_film_title"]
+                confirmed_chooser = confirmed["confirmed_chooser"]
 
-            # Force historical data to reload
-            st.cache_data.clear()
+                # Reload shared nominations after Supabase
+                # removed the watched film
+                refresh_film_choices()
 
-            st.session_state.confirmation_message = (
-                f"🎉 {selected_film} has been added "
-                f"to the family film history. "
-                f"{chooser} can now add a replacement film."
-            )
+                st.session_state.choice_refresh_counter += 1
 
-            st.rerun()
+                # Clear this browser's copy of the shared draw
+                st.session_state.draw_result = None
+                st.session_state.reveal_draw = False
+
+                # Reload film history on the next run
+                st.cache_data.clear()
+
+                st.session_state.confirmation_message = (
+                    f"🎉 {confirmed_film} has been added "
+                    f"to the family film history. "
+                    f"{confirmed_chooser} can now add "
+                    "a replacement film."
+                )
+
+                st.rerun()
+
+            except Exception as error:
+
+                # Another phone may already have confirmed it.
+                latest_draw = load_current_draw()
+
+                st.session_state.draw_result = latest_draw
+                st.session_state.reveal_draw = False
+
+                if latest_draw is None:
+
+                    st.session_state.draw_message = (
+                        "This draw has already been confirmed "
+                        "from another session."
+                    )
+
+                    st.cache_data.clear()
+                    refresh_film_choices()
+                    st.session_state.choice_refresh_counter += 1
+
+                    st.rerun()
+
+                st.error(
+                    f"Could not confirm the draw: {error}"
+                )
 
         # -------------------------------------------------
         # Development redraw
         # -------------------------------------------------
 
         if reset_clicked:
+
+            delete_current_draw()
 
             st.session_state.draw_result = None
             st.session_state.reveal_draw = False
