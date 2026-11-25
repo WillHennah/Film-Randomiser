@@ -1,5 +1,4 @@
 from pathlib import Path
-import json
 import random
 import time
 import pandas as pd
@@ -9,7 +8,6 @@ from supabase import create_client
 
 FAMILY = ["William", "Henna", "Miilo", "Aimi"]
 DATA_FILE = Path("watched_films.csv")
-CHOICES_FILE = Path("current_film_choices.json")
 
 # ---------------------------------------------------------
 # Configuration
@@ -65,58 +63,83 @@ def load_film_choices_from_supabase():
 
     return choices
 
-def save_film_choices(choices):
-    """Save the current film nominations to disk."""
+def save_person_film_choices(person, choices):
+    """
+    Replace one family member's nominations in Supabase.
 
-    with open(CHOICES_FILE, "w", encoding="utf-8") as file:
-        json.dump(
-            choices,
-            file,
-            indent=4,
-            ensure_ascii=False,
+    Only this person's rows are changed.
+    """
+
+    # Remove this person's existing nominations
+    (
+        supabase
+        .table("film_choices")
+        .delete()
+        .eq("family_member", person)
+        .execute()
+    )
+
+    # Create their replacement rows
+    rows = [
+        {
+            "family_member": person,
+            "film_title": film,
+        }
+        for film in choices
+        if film.strip()
+    ]
+
+    if rows:
+
+        (
+            supabase
+            .table("film_choices")
+            .insert(rows)
+            .execute()
         )
 
 def add_watched_film(film_name, chooser):
     """
-    Add a confirmed film to the watched-film history.
+    Add a confirmed watched film directly to Supabase.
     """
 
-    watched_date = date.today().strftime("%d.%m.%Y")
+    watched_date = date.today().isoformat()
 
-    new_row = pd.DataFrame(
-        [{
-            "Name": film_name,
-            "Chooser": chooser,
-            "Watched Date": watched_date,
-        }]
-    )
-
-    new_row.to_csv(
-        DATA_FILE,
-        mode="a",
-        header=False,
-        index=False,
+    (
+        supabase
+        .table("watched_films")
+        .insert({
+            "film_title": film_name,
+            "chooser": chooser,
+            "watched_date": watched_date,
+        })
+        .execute()
     )
 
 def remove_selected_film(chooser, film_name):
     """
-    Remove the confirmed watched film from the chooser's
-    nominations while leaving all other nominations intact.
+    Remove the watched film from Supabase and from
+    this session's nominations.
     """
 
-    choices = st.session_state.film_choices.get(chooser, [])
+    (
+        supabase
+        .table("film_choices")
+        .delete()
+        .eq("family_member", chooser)
+        .eq("film_title", film_name)
+        .execute()
+    )
 
     updated_choices = [
         film
-        for film in choices
+        for film in st.session_state.film_choices.get(
+            chooser, []
+        )
         if film != film_name
     ]
 
     st.session_state.film_choices[chooser] = updated_choices
-
-    save_film_choices(
-        st.session_state.film_choices
-    )
 
 # ---------------------------------------------------------
 # Film selection logic
@@ -201,11 +224,52 @@ if "confirmation_message" not in st.session_state:
 # ---------------------------------------------------------
 # Load film history
 # ---------------------------------------------------------
-
 @st.cache_data
 def load_history():
-    return pd.read_csv(DATA_FILE)
+    """
+    Load the complete watched-film history from Supabase
+    and return it in the format expected by the app.
+    """
 
+    response = (
+        supabase
+        .table("watched_films")
+        .select("film_title, chooser, watched_date")
+        .order("watched_date")
+        .execute()
+    )
+
+    watched = pd.DataFrame(response.data)
+
+    # Handle an empty database gracefully
+    if watched.empty:
+        return pd.DataFrame(
+            columns=[
+                "Name",
+                "Chooser",
+                "Watched Date",
+            ]
+        )
+
+    watched = watched.rename(
+        columns={
+            "film_title": "Name",
+            "chooser": "Chooser",
+            "watched_date": "Watched Date",
+        }
+    )
+
+    # Convert YYYY-MM-DD from Supabase back to the
+    # DD.MM.YYYY format used throughout the existing app
+    watched["Watched Date"] = (
+        pd.to_datetime(
+            watched["Watched Date"],
+            errors="coerce",
+        )
+        .dt.strftime("%d.%m.%Y")
+    )
+
+    return watched
 
 watched = load_history()
 
@@ -604,15 +668,25 @@ for tab, person in zip(tabs, FAMILY):
 
             else:
 
-                st.session_state.film_choices[person] = choices
+                try:
 
-                save_film_choices(
-                    st.session_state.film_choices
-                )
+                    save_person_film_choices(
+                        person=person,
+                        choices=choices,
+                    )
 
-                st.success(
-                    f"✅ {person}'s four films have been saved."
-                )
+                    # Update this session only AFTER Supabase succeeds
+                    st.session_state.film_choices[person] = choices
+
+                    st.success(
+                        f"✅ {person}'s four films have been saved."
+                    )
+
+                except Exception as error:
+
+                    st.error(
+                        f"Could not save {person}'s films: {error}"
+                    )
 
         # Show submission status
         if len(st.session_state.film_choices[person]) == 4:
