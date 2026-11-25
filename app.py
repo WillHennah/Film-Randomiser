@@ -1,6 +1,9 @@
 
 import random
 import time
+import base64
+import hashlib
+import hmac
 import pandas as pd
 import streamlit as st
 from datetime import date
@@ -36,6 +39,62 @@ supabase = get_supabase_client()
 # ---------------------------------------------------------
 # Film choice storage
 # ---------------------------------------------------------
+
+def hash_pin(pin, salt):
+    """
+    Derive a PIN hash using the same settings used
+    by setup_family_pins.py.
+    """
+
+    return hashlib.scrypt(
+        pin.encode("utf-8"),
+        salt=salt,
+        n=2**14,
+        r=8,
+        p=1,
+        dklen=32,
+    )
+
+def verify_family_pin(person, entered_pin):
+    """
+    Verify a family member's PIN without exposing or
+    storing the original PIN.
+    """
+
+    response = (
+        supabase
+        .table("family_members")
+        .select("pin_salt, pin_hash, active")
+        .eq("name", person)
+        .limit(1)
+        .execute()
+    )
+
+    if not response.data:
+        return False
+
+    record = response.data[0]
+
+    if not record["active"]:
+        return False
+
+    salt = base64.b64decode(
+        record["pin_salt"]
+    )
+
+    expected_hash = base64.b64decode(
+        record["pin_hash"]
+    )
+
+    entered_hash = hash_pin(
+        pin=entered_pin,
+        salt=salt,
+    )
+
+    return hmac.compare_digest(
+        entered_hash,
+        expected_hash,
+    )
 
 def load_film_choices_from_supabase():
 
@@ -74,12 +133,21 @@ def refresh_film_choices():
 
 def save_person_film_choices(person, choices):
     """
-    Replace one family member's nominations in Supabase.
+    Save one family member's nominations.
 
-    Only this person's rows are changed.
+    The caller must be the currently authenticated
+    family member.
     """
 
-    # Remove this person's existing nominations
+    if (
+        st.session_state.logged_in_user
+        != person
+    ):
+
+        raise PermissionError(
+            "You can only edit your own film choices."
+        )
+
     (
         supabase
         .table("film_choices")
@@ -88,7 +156,6 @@ def save_person_film_choices(person, choices):
         .execute()
     )
 
-    # Create their replacement rows
     rows = [
         {
             "family_member": person,
@@ -345,6 +412,12 @@ if "save_message" not in st.session_state:
 if "draw_message" not in st.session_state:
     st.session_state.draw_message = None
 
+if "logged_in_user" not in st.session_state:
+    st.session_state.logged_in_user = None
+
+if "login_error" not in st.session_state:
+    st.session_state.login_error = None
+
 # ---------------------------------------------------------
 # Load film history
 # ---------------------------------------------------------
@@ -425,6 +498,86 @@ st.write(
     "Everyone chooses four films. "
     "Then we let the randomiser decide what we're watching."
 )
+
+# ---------------------------------------------------------
+# Family login
+# ---------------------------------------------------------
+
+if st.session_state.logged_in_user is None:
+
+    st.subheader("🔐 Who are you?")
+
+    with st.form("family_login_form"):
+
+        selected_person = st.selectbox(
+            "Family member",
+            FAMILY,
+        )
+
+        entered_pin = st.text_input(
+            "PIN",
+            type="password",
+            max_chars=8,
+        )
+
+        login_clicked = st.form_submit_button(
+            "Log in",
+            type="primary",
+            use_container_width=True,
+        )
+
+    if login_clicked:
+
+        if verify_family_pin(
+            person=selected_person,
+            entered_pin=entered_pin,
+        ):
+
+            st.session_state.logged_in_user = (
+                selected_person
+            )
+
+            st.session_state.login_error = None
+
+            st.rerun()
+
+        else:
+
+            st.session_state.login_error = (
+                "The name and PIN did not match."
+            )
+
+    if st.session_state.login_error:
+
+        st.error(
+            st.session_state.login_error
+        )
+
+    st.stop()
+
+identity_col, logout_col = st.columns(
+    [3, 1],
+    vertical_alignment="center",
+)
+
+with identity_col:
+
+    st.caption(
+        f"Signed in as "
+        f"**{st.session_state.logged_in_user}**"
+    )
+
+with logout_col:
+
+    if st.button(
+        "Log out",
+        use_container_width=True,
+    ):
+
+        st.session_state.logged_in_user = None
+        st.session_state.login_error = None
+
+        st.rerun()
 
 st.divider()
 
@@ -715,155 +868,200 @@ else:
 
 st.divider()
 
-st.subheader("🎟️ This week's films")
+st.subheader("🎟️ Your film choices")
+
+person = st.session_state.logged_in_user
 
 st.write(
-    "Everyone nominates four films they'd be happy to watch. "
+    f"Hi **{person}**! Keep four films here that you'd "
+    "be happy for the family to watch. "
     "**All four films have an equal chance of being selected.**"
 )
 
-if st.session_state.save_message:
+# ---------------------------------------------------------
+# Refresh nominations from Supabase
+# ---------------------------------------------------------
 
-    st.success(
-        st.session_state.save_message
+if st.button(
+    "🔄 Refresh film choices",
+    use_container_width=True,
+):
+
+    refresh_film_choices()
+
+    st.session_state.choice_refresh_counter += 1
+
+    st.rerun()
+
+
+# ---------------------------------------------------------
+# Current logged-in user's films
+# ---------------------------------------------------------
+
+existing_choices = (
+    st.session_state.film_choices.get(
+        person,
+        [],
     )
-
-    st.session_state.save_message = None
-
-refresh_col, status_col = st.columns(
-    [1, 2],
-    vertical_alignment="center",
 )
 
-with refresh_col:
+st.markdown(f"### 🎬 {person}'s films")
 
-    if st.button(
-        "🔄 Refresh choices",
-        use_container_width=True,
-    ):
+with st.form(
+    key=f"{person}_film_form"
+):
 
-        refresh_film_choices()
-
-        st.session_state.choice_refresh_counter += 1
-
-        st.rerun()
-
-with status_col:
-
-    st.caption(
-        "Refresh to see changes submitted from another phone."
+    film_1 = st.text_input(
+        "Film 1",
+        value=(
+            existing_choices[0]
+            if len(existing_choices) > 0
+            else ""
+        ),
+        key=(
+            f"{person}_film_1_"
+            f"{st.session_state.choice_refresh_counter}"
+        ),
     )
 
-tabs = st.tabs(FAMILY)
+    film_2 = st.text_input(
+        "Film 2",
+        value=(
+            existing_choices[1]
+            if len(existing_choices) > 1
+            else ""
+        ),
+        key=(
+            f"{person}_film_2_"
+            f"{st.session_state.choice_refresh_counter}"
+        ),
+    )
 
-for tab, person in zip(tabs, FAMILY):
+    film_3 = st.text_input(
+        "Film 3",
+        value=(
+            existing_choices[2]
+            if len(existing_choices) > 2
+            else ""
+        ),
+        key=(
+            f"{person}_film_3_"
+            f"{st.session_state.choice_refresh_counter}"
+        ),
+    )
 
-    with tab:
+    film_4 = st.text_input(
+        "Film 4",
+        value=(
+            existing_choices[3]
+            if len(existing_choices) > 3
+            else ""
+        ),
+        key=(
+            f"{person}_film_4_"
+            f"{st.session_state.choice_refresh_counter}"
+        ),
+    )
 
-        st.markdown(f"### 🎬 {person}'s films")
+    submitted = st.form_submit_button(
+        "Save my films",
+        type="primary",
+        use_container_width=True,
+    )
 
-        existing_choices = st.session_state.film_choices[person]
 
-        with st.form(key=f"{person}_film_form"):
+# ---------------------------------------------------------
+# Save nominations
+# ---------------------------------------------------------
 
-            film_1 = st.text_input(
-                "Film 1",
-                value=existing_choices[0]
-                if len(existing_choices) > 0 else "",
-                key=(
-                    f"{person}_film_1_"
-                    f"{st.session_state.choice_refresh_counter}"
-                ),
+if submitted:
+
+    choices = [
+        film_1.strip(),
+        film_2.strip(),
+        film_3.strip(),
+        film_4.strip(),
+    ]
+
+    if any(
+        choice == ""
+        for choice in choices
+    ):
+
+        st.error(
+            "Please nominate four films before saving."
+        )
+
+    elif len(
+        set(
+            choice.lower()
+            for choice in choices
+        )
+    ) < 4:
+
+        st.error(
+            "You've nominated the same film more than once."
+        )
+
+    else:
+
+        try:
+
+            save_person_film_choices(
+                person=person,
+                choices=choices,
             )
 
-            film_2 = st.text_input(
-                "Film 2",
-                value=existing_choices[1]
-                if len(existing_choices) > 1 else "",
-                key=(
-                    f"{person}_film_2_"
-                    f"{st.session_state.choice_refresh_counter}"
-                ),
+            refresh_film_choices()
+
+            st.session_state.choice_refresh_counter += 1
+
+            st.session_state.save_message = (
+                "✅ Your four films have been saved."
             )
 
-            film_3 = st.text_input(
-                "Film 3",
-                value=existing_choices[2]
-                if len(existing_choices) > 2 else "",
-                key=(
-                    f"{person}_film_3_"
-                    f"{st.session_state.choice_refresh_counter}"
-                ),
+            st.rerun()
+
+        except Exception as error:
+
+            st.error(
+                f"Could not save your films: {error}"
             )
 
-            film_4 = st.text_input(
-                "Film 4",
-                value=existing_choices[3]
-                if len(existing_choices) > 3 else "",
-                key=(
-                    f"{person}_film_4_"
-                    f"{st.session_state.choice_refresh_counter}"
-                ),
+
+# ---------------------------------------------------------
+# Submission status
+# ---------------------------------------------------------
+
+if len(
+    st.session_state.film_choices.get(
+        person,
+        [],
+    )
+) == 4:
+
+    st.caption(
+        "✅ You have four films ready for the next draw."
+    )
+
+else:
+
+    missing_count = (
+        4
+        - len(
+            st.session_state.film_choices.get(
+                person,
+                [],
             )
+        )
+    )
 
-            submitted = st.form_submit_button(
-                "Save my films",
-                use_container_width=True,
-            )
-
-        if submitted:
-
-            choices = [
-                film_1.strip(),
-                film_2.strip(),
-                film_3.strip(),
-                film_4.strip(),
-            ]
-
-            # Check that all four nominations have been entered
-            if any(choice == "" for choice in choices):
-
-                st.error(
-                    "Please nominate four films before saving."
-                )
-
-            # Prevent someone nominating the same film twice
-            elif len(set(choice.lower() for choice in choices)) < 4:
-
-                st.error(
-                    "You've nominated the same film more than once."
-                )
-
-            else:
-
-                try:
-
-                    save_person_film_choices(
-                        person=person,
-                        choices=choices,
-                    )
-
-                    refresh_film_choices()
-
-                    st.session_state.choice_refresh_counter += 1
-
-
-                    st.rerun()
-
-                except Exception as error:
-
-                    st.error(
-                        f"Could not save {person}'s films: {error}"
-                    )
-
-        # Show submission status
-        if len(st.session_state.film_choices[person]) == 4:
-
-            st.caption("✅ Four films submitted")
-
-        else:
-
-            st.caption("⏳ Waiting for four films")
+    st.warning(
+        f"⏳ You need to add {missing_count} more "
+        "film"
+        f"{'s' if missing_count != 1 else ''} "
+        "before the next draw."
+    )
 
 # ---------------------------------------------------------
 # Submission progress
